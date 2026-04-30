@@ -19,6 +19,7 @@ import {
 } from '@/data/messages'
 import { dms } from '@/data/dms'
 import { supabase } from '@/lib/supabase'
+import { useAuth } from '@/hooks/useAuth'
 
 type SelectedItem =
   | { type: 'channel'; id: string }
@@ -45,12 +46,20 @@ type SidebarContentProps = {
   channels: Channel[]
   selectedItem: SelectedItem | null
   onSelect: (item: SelectedItem) => void
+  joinedChannelIds: Set<string>
+  canManage: boolean
+  onJoin: (channelId: string) => void
+  onLeave: (channelId: string) => void
 }
 
 function SidebarContent({
   channels,
   selectedItem,
   onSelect,
+  joinedChannelIds,
+  canManage,
+  onJoin,
+  onLeave,
 }: SidebarContentProps) {
   const isSelected = (item: SelectedItem) =>
     selectedItem?.type === item.type && selectedItem?.id === item.id
@@ -67,6 +76,7 @@ function SidebarContent({
         <ul className="flex flex-col">
           {channels.map((c) => {
             const selected = isSelected({ type: 'channel', id: c.id })
+            const joined = joinedChannelIds.has(c.id)
             return (
               <li
                 key={c.id}
@@ -76,7 +86,21 @@ function SidebarContent({
                 }`}
               >
                 <span className="text-white/70">#</span>
-                <span>{c.name}</span>
+                <span className="flex-1 truncate">{c.name}</span>
+                {canManage && (
+                  <Button
+                    size="sm"
+                    variant="secondary"
+                    className="h-6 px-2 text-xs"
+                    onClick={(e) => {
+                      e.stopPropagation()
+                      if (joined) onLeave(c.id)
+                      else onJoin(c.id)
+                    }}
+                  >
+                    {joined ? '退出する' : '参加する'}
+                  </Button>
+                )}
               </li>
             )
           })}
@@ -341,16 +365,35 @@ type ChannelMessageRow = {
   user_name: string
   content: string
   created_at: string
+  user_id: string | null
+}
+
+function rowToMessage(r: ChannelMessageRow): Message {
+  return {
+    id: r.id,
+    type: 'channel',
+    parentId: r.channel_id,
+    userName: r.user_name,
+    body: r.content,
+    createdAt: r.created_at,
+    reactions: {},
+    userId: r.user_id,
+  }
 }
 
 export default function App() {
   const navigate = useNavigate()
+  const { session } = useAuth()
   const [isOpen, setIsOpen] = useState(false)
   const [channels, setChannels] = useState<Channel[]>([])
   const [selectedItem, setSelectedItem] = useState<SelectedItem | null>(null)
   const [messages, setMessages] = useState<Message[]>(initialMessages)
   const [input, setInput] = useState('')
+  const [joinedChannelIds, setJoinedChannelIds] = useState<Set<string>>(
+    new Set()
+  )
   const endRef = useRef<HTMLDivElement>(null)
+  const userId = session?.user.id ?? null
 
   const selectedChannelId =
     selectedItem?.type === 'channel' ? selectedItem.id : null
@@ -362,21 +405,44 @@ export default function App() {
       )
     : []
 
-  useEffect(() => {
-    const fetchChannels = async () => {
-      const { data, error } = await supabase.from('channels').select('*')
-      if (error) {
-        console.error(error)
-        return
-      }
-      const list = (data ?? []) as Channel[]
-      setChannels(list)
-      setSelectedItem((prev) =>
-        prev ?? (list[0] ? { type: 'channel', id: list[0].id } : null)
-      )
+  const fetchChannels = async () => {
+    const { data, error } = await supabase.from('channels').select('*')
+    if (error) {
+      console.error(error)
+      return
     }
+    const list = (data ?? []) as Channel[]
+    setChannels(list)
+    setSelectedItem((prev) =>
+      prev ?? (list[0] ? { type: 'channel', id: list[0].id } : null)
+    )
+  }
+
+  const fetchJoinedChannels = async (uid: string) => {
+    const { data, error } = await supabase
+      .from('channel_members')
+      .select('channel_id')
+      .eq('user_id', uid)
+    if (error) {
+      console.error(error)
+      return
+    }
+    setJoinedChannelIds(
+      new Set((data ?? []).map((r) => r.channel_id as string))
+    )
+  }
+
+  useEffect(() => {
     fetchChannels()
   }, [])
+
+  useEffect(() => {
+    if (!userId) {
+      setJoinedChannelIds(new Set())
+      return
+    }
+    fetchJoinedChannels(userId)
+  }, [userId])
 
   const loadChannelMessages = async (channelId: string) => {
     const { data, error } = await supabase
@@ -389,15 +455,7 @@ export default function App() {
       return
     }
     const mapped: Message[] = ((data ?? []) as ChannelMessageRow[]).map(
-      (r) => ({
-        id: r.id,
-        type: 'channel',
-        parentId: r.channel_id,
-        userName: r.user_name,
-        body: r.content,
-        createdAt: r.created_at,
-        reactions: {},
-      })
+      rowToMessage
     )
     setMessages(mapped)
   }
@@ -415,15 +473,7 @@ export default function App() {
           console.log('realtime payload', payload)
           const row = payload.new as ChannelMessageRow
           if (row.channel_id !== selectedChannelId) return
-          const message: Message = {
-            id: row.id,
-            type: 'channel',
-            parentId: row.channel_id,
-            userName: row.user_name,
-            body: row.content,
-            createdAt: row.created_at,
-            reactions: {},
-          }
+          const message = rowToMessage(row)
           setMessages((prev) =>
             prev.some((m) => m.id === message.id) ? prev : [...prev, message]
           )
@@ -462,6 +512,7 @@ export default function App() {
         content: text,
         channel_id: selectedItem.id,
         user_name: '自分',
+        user_id: session?.user.id ?? null,
       })
       if (error) {
         console.error(error)
@@ -491,6 +542,44 @@ export default function App() {
 
   const handleDelete = (id: string) => {
     setMessages((prev) => prev.filter((m) => m.id !== id))
+  }
+
+  const refreshAfterMembershipChange = async () => {
+    if (!userId) return
+    await Promise.all([
+      fetchChannels(),
+      fetchJoinedChannels(userId),
+      selectedChannelId
+        ? loadChannelMessages(selectedChannelId)
+        : Promise.resolve(),
+    ])
+  }
+
+  const handleJoinChannel = async (channelId: string) => {
+    if (!userId) return
+    const { error } = await supabase
+      .from('channel_members')
+      .insert({ channel_id: channelId, user_id: userId })
+      .select()
+    if (error) {
+      toast.error(error.message)
+      return
+    }
+    await refreshAfterMembershipChange()
+  }
+
+  const handleLeaveChannel = async (channelId: string) => {
+    if (!userId) return
+    const { error } = await supabase
+      .from('channel_members')
+      .delete()
+      .eq('channel_id', channelId)
+      .eq('user_id', userId)
+    if (error) {
+      toast.error(error.message)
+      return
+    }
+    await refreshAfterMembershipChange()
   }
 
   const handleLogout = async () => {
@@ -524,6 +613,10 @@ export default function App() {
         channels={channels}
         selectedItem={selectedItem}
         onSelect={setSelectedItem}
+        joinedChannelIds={joinedChannelIds}
+        canManage={!!userId}
+        onJoin={handleJoinChannel}
+        onLeave={handleLeaveChannel}
       />
       <Sheet open={isOpen} onOpenChange={setIsOpen}>
         <SheetContent
@@ -534,6 +627,10 @@ export default function App() {
             channels={channels}
             selectedItem={selectedItem}
             onSelect={setSelectedItem}
+            joinedChannelIds={joinedChannelIds}
+            canManage={!!userId}
+            onJoin={handleJoinChannel}
+            onLeave={handleLeaveChannel}
           />
         </SheetContent>
       </Sheet>
