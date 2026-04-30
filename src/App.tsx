@@ -1,4 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
+import { useNavigate } from 'react-router-dom'
+import { toast } from 'sonner'
 import { Menu, Pencil, Smile, Trash2 } from 'lucide-react'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -122,10 +124,12 @@ function ChannelHeader({
   channels,
   selectedItem,
   onMenuClick,
+  onLogout,
 }: {
   channels: Channel[]
   selectedItem: SelectedItem | null
   onMenuClick: () => void
+  onLogout: () => void
 }) {
   const label = !selectedItem
     ? ''
@@ -145,6 +149,14 @@ function ChannelHeader({
         <Menu className="size-5" />
       </Button>
       <h2 className="text-xl font-bold">{label}</h2>
+      <Button
+        variant="destructive"
+        size="sm"
+        className="ml-auto"
+        onClick={onLogout}
+      >
+        ログアウト
+      </Button>
     </header>
   )
 }
@@ -332,6 +344,7 @@ type ChannelMessageRow = {
 }
 
 export default function App() {
+  const navigate = useNavigate()
   const [isOpen, setIsOpen] = useState(false)
   const [channels, setChannels] = useState<Channel[]>([])
   const [selectedItem, setSelectedItem] = useState<SelectedItem | null>(null)
@@ -480,6 +493,15 @@ export default function App() {
     setMessages((prev) => prev.filter((m) => m.id !== id))
   }
 
+  const handleLogout = async () => {
+    const { error } = await supabase.auth.signOut()
+    if (error) {
+      toast.error(error.message)
+      return
+    }
+    navigate('/login', { replace: true })
+  }
+
   const handleReact = (id: string, emoji: string) => {
     setMessages((prev) =>
       prev.map((m) =>
@@ -520,6 +542,7 @@ export default function App() {
           channels={channels}
           selectedItem={selectedItem}
           onMenuClick={() => setIsOpen(true)}
+          onLogout={handleLogout}
         />
         <MessageList
           items={visibleMessages}
