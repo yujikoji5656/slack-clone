@@ -1,10 +1,20 @@
-import { useState } from 'react'
-import { Menu } from 'lucide-react'
+import { useEffect, useRef, useState } from 'react'
+import { Menu, Pencil, Smile, Trash2 } from 'lucide-react'
+import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Avatar, AvatarFallback } from '@/components/ui/avatar'
 import { Sheet, SheetContent } from '@/components/ui/sheet'
-import { channels, messages, type Message } from '@/data/messages'
+import {
+  Popover,
+  PopoverContent,
+  PopoverTrigger,
+} from '@/components/ui/popover'
+import {
+  channels,
+  messages as initialMessages,
+  type Message,
+} from '@/data/messages'
 import { dms } from '@/data/dms'
 
 type SelectedItem =
@@ -25,6 +35,8 @@ function formatTime(iso: string) {
   const mm = String(d.getMinutes()).padStart(2, '0')
   return `${hh}:${mm}`
 }
+
+const EMOJI_OPTIONS = ['👍', '❤️', '😂', '🎉', '😮']
 
 type SidebarContentProps = {
   selectedItem: SelectedItem
@@ -128,34 +140,176 @@ function ChannelHeader({
   )
 }
 
-function MessageList({ items }: { items: Message[] }) {
+function MessageList({
+  items,
+  endRef,
+  onEdit,
+  onDelete,
+  onReact,
+}: {
+  items: Message[]
+  endRef: React.RefObject<HTMLDivElement | null>
+  onEdit: (id: string, body: string) => void
+  onDelete: (id: string) => void
+  onReact: (id: string, emoji: string) => void
+}) {
+  const [editingId, setEditingId] = useState<string | null>(null)
+  const [editText, setEditText] = useState('')
+
+  const startEdit = (m: Message) => {
+    setEditingId(m.id)
+    setEditText(m.body)
+  }
+
+  const cancelEdit = () => {
+    setEditingId(null)
+    setEditText('')
+  }
+
+  const saveEdit = (id: string) => {
+    onEdit(id, editText)
+    setEditingId(null)
+    setEditText('')
+  }
+
+  const handleDelete = (id: string) => {
+    if (window.confirm('削除しますか？')) {
+      onDelete(id)
+    }
+  }
+
   return (
     <div className="flex-1 overflow-y-auto px-6 py-4 flex flex-col gap-4">
       {items.map((m) => (
-        <div key={m.id} className="flex gap-3">
+        <div key={m.id} className="group relative flex gap-3">
           <Avatar>
             <AvatarFallback>{getInitials(m.userName)}</AvatarFallback>
           </Avatar>
-          <div className="flex flex-col">
+          <div className="flex flex-col flex-1">
             <div className="flex items-baseline gap-2">
               <span className="font-semibold">{m.userName}</span>
               <span className="text-xs text-muted-foreground">
                 {formatTime(m.createdAt)}
               </span>
             </div>
-            <p className="text-sm">{m.body}</p>
+            {editingId === m.id ? (
+              <div className="mt-1 flex flex-col gap-2">
+                <textarea
+                  value={editText}
+                  onChange={(e) => setEditText(e.target.value)}
+                  className="w-full text-sm border rounded p-2 resize-y min-h-16"
+                />
+                <div className="flex gap-2">
+                  <Button size="sm" onClick={() => saveEdit(m.id)}>
+                    保存
+                  </Button>
+                  <Button size="sm" variant="outline" onClick={cancelEdit}>
+                    キャンセル
+                  </Button>
+                </div>
+              </div>
+            ) : (
+              <p className="text-sm">{m.body}</p>
+            )}
+            {Object.entries(m.reactions).filter(([, count]) => count > 0)
+              .length > 0 && (
+              <div className="mt-1 flex flex-wrap gap-1">
+                {Object.entries(m.reactions)
+                  .filter(([, count]) => count > 0)
+                  .map(([emoji, count]) => (
+                    <Badge
+                      key={emoji}
+                      variant="secondary"
+                      className="cursor-pointer"
+                      onClick={() => onReact(m.id, emoji)}
+                    >
+                      <span>{emoji}</span>
+                      <span className="ml-1">{count}</span>
+                    </Badge>
+                  ))}
+              </div>
+            )}
           </div>
+          {editingId !== m.id && (
+            <div className="absolute top-2 right-2 opacity-0 group-hover:opacity-100 transition flex gap-1">
+              <Popover>
+                <PopoverTrigger asChild>
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    className="h-7 w-7"
+                    aria-label="リアクション"
+                  >
+                    <Smile className="size-4" />
+                  </Button>
+                </PopoverTrigger>
+                <PopoverContent className="w-auto p-1 flex gap-1">
+                  {EMOJI_OPTIONS.map((emoji) => (
+                    <button
+                      key={emoji}
+                      type="button"
+                      onClick={() => onReact(m.id, emoji)}
+                      className="h-8 w-8 text-lg rounded hover:bg-muted"
+                      aria-label={`${emoji} を追加`}
+                    >
+                      {emoji}
+                    </button>
+                  ))}
+                </PopoverContent>
+              </Popover>
+              <Button
+                variant="ghost"
+                size="icon"
+                className="h-7 w-7"
+                onClick={() => startEdit(m)}
+                aria-label="編集"
+              >
+                <Pencil className="size-4" />
+              </Button>
+              <Button
+                variant="ghost"
+                size="icon"
+                className="h-7 w-7"
+                onClick={() => handleDelete(m.id)}
+                aria-label="削除"
+              >
+                <Trash2 className="size-4" />
+              </Button>
+            </div>
+          )}
         </div>
       ))}
+      <div ref={endRef} />
     </div>
   )
 }
 
-function MessageInput() {
+function MessageInput({
+  input,
+  setInput,
+  onSend,
+}: {
+  input: string
+  setInput: (v: string) => void
+  onSend: () => void
+}) {
+  const handleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault()
+      onSend()
+    }
+  }
+
   return (
     <div className="sticky bottom-0 border-t bg-background px-6 py-3 flex gap-2">
-      <Input placeholder="# general へメッセージを送信" className="flex-1" />
-      <Button>送信</Button>
+      <Input
+        value={input}
+        onChange={(e) => setInput(e.target.value)}
+        onKeyDown={handleKeyDown}
+        placeholder="メッセージを送信"
+        className="flex-1"
+      />
+      <Button onClick={onSend}>送信</Button>
     </div>
   )
 }
@@ -166,10 +320,58 @@ export default function App() {
     type: 'channel',
     id: channels[0].id,
   })
+  const [messages, setMessages] = useState<Message[]>(initialMessages)
+  const [input, setInput] = useState('')
+  const endRef = useRef<HTMLDivElement>(null)
 
   const visibleMessages = messages.filter(
     (m) => m.type === selectedItem.type && m.parentId === selectedItem.id
   )
+
+  useEffect(() => {
+    endRef.current?.scrollIntoView({ behavior: 'smooth' })
+  }, [messages])
+
+  const handleSend = () => {
+    if (!input.trim()) return
+    const newMessage: Message = {
+      id: crypto.randomUUID(),
+      type: selectedItem.type,
+      parentId: selectedItem.id,
+      userName: '自分',
+      body: input,
+      createdAt: new Date().toISOString(),
+      reactions: {},
+    }
+    setMessages((prev) => [...prev, newMessage])
+    setInput('')
+  }
+
+  const handleEdit = (id: string, body: string) => {
+    setMessages((prev) =>
+      prev.map((m) => (m.id === id ? { ...m, body } : m))
+    )
+  }
+
+  const handleDelete = (id: string) => {
+    setMessages((prev) => prev.filter((m) => m.id !== id))
+  }
+
+  const handleReact = (id: string, emoji: string) => {
+    setMessages((prev) =>
+      prev.map((m) =>
+        m.id === id
+          ? {
+              ...m,
+              reactions: {
+                ...m.reactions,
+                [emoji]: (m.reactions[emoji] ?? 0) + 1,
+              },
+            }
+          : m
+      )
+    )
+  }
 
   return (
     <div className="min-h-screen flex">
@@ -190,8 +392,14 @@ export default function App() {
           selectedItem={selectedItem}
           onMenuClick={() => setIsOpen(true)}
         />
-        <MessageList items={visibleMessages} />
-        <MessageInput />
+        <MessageList
+          items={visibleMessages}
+          endRef={endRef}
+          onEdit={handleEdit}
+          onDelete={handleDelete}
+          onReact={handleReact}
+        />
+        <MessageInput input={input} setInput={setInput} onSend={handleSend} />
       </main>
     </div>
   )
