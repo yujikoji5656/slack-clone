@@ -1,10 +1,12 @@
 import { useEffect, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { toast } from 'sonner'
-import { Menu, Pencil, Smile, Trash2 } from 'lucide-react'
+import { AlertCircle, Menu, Pencil, Smile, Trash2 } from 'lucide-react'
+import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
+import { Skeleton } from '@/components/ui/skeleton'
 import { Avatar, AvatarFallback } from '@/components/ui/avatar'
 import { Sheet, SheetContent } from '@/components/ui/sheet'
 import {
@@ -50,6 +52,8 @@ type SidebarContentProps = {
   canManage: boolean
   onJoin: (channelId: string) => void
   onLeave: (channelId: string) => void
+  channelsLoading: boolean
+  channelsError: string | null
 }
 
 function SidebarContent({
@@ -60,6 +64,8 @@ function SidebarContent({
   canManage,
   onJoin,
   onLeave,
+  channelsLoading,
+  channelsError,
 }: SidebarContentProps) {
   const isSelected = (item: SelectedItem) =>
     selectedItem?.type === item.type && selectedItem?.id === item.id
@@ -73,6 +79,21 @@ function SidebarContent({
         <div className="px-3 py-1 text-xs uppercase tracking-wide text-white/70">
           チャンネル
         </div>
+        {channelsLoading ? (
+          <div className="px-3 flex flex-col gap-2">
+            <Skeleton className="h-6 w-full bg-white/10" />
+            <Skeleton className="h-6 w-full bg-white/10" />
+            <Skeleton className="h-6 w-3/4 bg-white/10" />
+          </div>
+        ) : channelsError ? (
+          <div className="px-3 py-2 text-xs text-red-200 bg-red-500/20 rounded">
+            読み込みに失敗しました
+          </div>
+        ) : channels.length === 0 ? (
+          <div className="px-3 py-2 text-xs text-white/60">
+            チャンネルがありません
+          </div>
+        ) : (
         <ul className="flex flex-col">
           {channels.map((c) => {
             const selected = isSelected({ type: 'channel', id: c.id })
@@ -105,6 +126,7 @@ function SidebarContent({
             )
           })}
         </ul>
+        )}
       </div>
       <div className="px-2 pb-3 flex flex-col gap-1">
         <div className="px-3 py-2 text-xs uppercase tracking-wide opacity-70">
@@ -191,12 +213,16 @@ function MessageList({
   onEdit,
   onDelete,
   onReact,
+  loading,
+  error,
 }: {
   items: Message[]
   endRef: React.RefObject<HTMLDivElement | null>
   onEdit: (id: string, body: string) => void
   onDelete: (id: string) => void
   onReact: (id: string, emoji: string) => void
+  loading: boolean
+  error: string | null
 }) {
   const [editingId, setEditingId] = useState<string | null>(null)
   const [editText, setEditText] = useState('')
@@ -221,6 +247,42 @@ function MessageList({
     if (window.confirm('削除しますか？')) {
       onDelete(id)
     }
+  }
+
+  if (loading) {
+    return (
+      <div className="flex-1 overflow-y-auto px-6 py-4 flex flex-col gap-4">
+        {Array.from({ length: 4 }).map((_, i) => (
+          <div key={i} className="flex gap-3">
+            <Skeleton className="h-10 w-10 rounded-full" />
+            <div className="flex-1 flex flex-col gap-2">
+              <Skeleton className="h-4 w-32" />
+              <Skeleton className="h-4 w-3/4" />
+            </div>
+          </div>
+        ))}
+      </div>
+    )
+  }
+
+  if (error) {
+    return (
+      <div className="flex-1 overflow-y-auto px-6 py-4">
+        <Alert variant="destructive">
+          <AlertCircle className="size-4" />
+          <AlertTitle>読み込みに失敗しました</AlertTitle>
+          <AlertDescription>{error}</AlertDescription>
+        </Alert>
+      </div>
+    )
+  }
+
+  if (items.length === 0) {
+    return (
+      <div className="flex-1 overflow-y-auto px-6 py-4 flex items-center justify-center text-sm text-muted-foreground">
+        まだメッセージがありません
+      </div>
+    )
   }
 
   return (
@@ -392,6 +454,10 @@ export default function App() {
   const [joinedChannelIds, setJoinedChannelIds] = useState<Set<string>>(
     new Set()
   )
+  const [channelsLoading, setChannelsLoading] = useState(true)
+  const [channelsError, setChannelsError] = useState<string | null>(null)
+  const [messagesLoading, setMessagesLoading] = useState(false)
+  const [messagesError, setMessagesError] = useState<string | null>(null)
   const endRef = useRef<HTMLDivElement>(null)
   const userId = session?.user.id ?? null
 
@@ -406,9 +472,13 @@ export default function App() {
     : []
 
   const fetchChannels = async () => {
+    setChannelsLoading(true)
+    setChannelsError(null)
     const { data, error } = await supabase.from('channels').select('*')
+    setChannelsLoading(false)
     if (error) {
       console.error(error)
+      setChannelsError(error.message)
       return
     }
     const list = (data ?? []) as Channel[]
@@ -445,13 +515,17 @@ export default function App() {
   }, [userId])
 
   const loadChannelMessages = async (channelId: string) => {
+    setMessagesLoading(true)
+    setMessagesError(null)
     const { data, error } = await supabase
       .from('messages')
       .select('*')
       .eq('channel_id', channelId)
       .order('created_at', { ascending: true })
+    setMessagesLoading(false)
     if (error) {
       console.error(error)
+      setMessagesError(error.message)
       return
     }
     const mapped: Message[] = ((data ?? []) as ChannelMessageRow[]).map(
@@ -470,7 +544,6 @@ export default function App() {
         'postgres_changes',
         { event: 'INSERT', schema: 'public', table: 'messages' },
         (payload) => {
-          console.log('realtime payload', payload)
           const row = payload.new as ChannelMessageRow
           if (row.channel_id !== selectedChannelId) return
           const message = rowToMessage(row)
@@ -479,9 +552,27 @@ export default function App() {
           )
         }
       )
-      .subscribe((status) => {
-        console.log('channel status', status)
-      })
+      .on(
+        'postgres_changes',
+        { event: 'UPDATE', schema: 'public', table: 'messages' },
+        (payload) => {
+          const row = payload.new as ChannelMessageRow
+          if (row.channel_id !== selectedChannelId) return
+          setMessages((prev) =>
+            prev.map((m) => (m.id === row.id ? rowToMessage(row) : m))
+          )
+        }
+      )
+      .on(
+        'postgres_changes',
+        { event: 'DELETE', schema: 'public', table: 'messages' },
+        (payload) => {
+          const oldRow = payload.old as { id?: string }
+          if (!oldRow.id) return
+          setMessages((prev) => prev.filter((m) => m.id !== oldRow.id))
+        }
+      )
+      .subscribe()
 
     return () => {
       supabase.removeChannel(channel)
@@ -534,13 +625,32 @@ export default function App() {
     setInput('')
   }
 
-  const handleEdit = (id: string, body: string) => {
+  const handleEdit = async (id: string, body: string) => {
+    const target = messages.find((m) => m.id === id)
+    if (target?.type === 'channel') {
+      const { error } = await supabase
+        .from('messages')
+        .update({ content: body })
+        .eq('id', id)
+      if (error) {
+        toast.error(error.message)
+        return
+      }
+    }
     setMessages((prev) =>
       prev.map((m) => (m.id === id ? { ...m, body } : m))
     )
   }
 
-  const handleDelete = (id: string) => {
+  const handleDelete = async (id: string) => {
+    const target = messages.find((m) => m.id === id)
+    if (target?.type === 'channel') {
+      const { error } = await supabase.from('messages').delete().eq('id', id)
+      if (error) {
+        toast.error(error.message)
+        return
+      }
+    }
     setMessages((prev) => prev.filter((m) => m.id !== id))
   }
 
@@ -617,6 +727,8 @@ export default function App() {
         canManage={!!userId}
         onJoin={handleJoinChannel}
         onLeave={handleLeaveChannel}
+        channelsLoading={channelsLoading}
+        channelsError={channelsError}
       />
       <Sheet open={isOpen} onOpenChange={setIsOpen}>
         <SheetContent
@@ -631,6 +743,8 @@ export default function App() {
             canManage={!!userId}
             onJoin={handleJoinChannel}
             onLeave={handleLeaveChannel}
+            channelsLoading={channelsLoading}
+            channelsError={channelsError}
           />
         </SheetContent>
       </Sheet>
@@ -647,6 +761,10 @@ export default function App() {
           onEdit={handleEdit}
           onDelete={handleDelete}
           onReact={handleReact}
+          loading={
+            selectedItem?.type === 'channel' ? messagesLoading : false
+          }
+          error={selectedItem?.type === 'channel' ? messagesError : null}
         />
         <MessageInput input={input} setInput={setInput} onSend={handleSend} />
       </main>
