@@ -11,11 +11,12 @@ import {
   PopoverTrigger,
 } from '@/components/ui/popover'
 import {
-  channels,
   messages as initialMessages,
+  type Channel,
   type Message,
 } from '@/data/messages'
 import { dms } from '@/data/dms'
+import { supabase } from '@/lib/supabase'
 
 type SelectedItem =
   | { type: 'channel'; id: string }
@@ -39,13 +40,18 @@ function formatTime(iso: string) {
 const EMOJI_OPTIONS = ['👍', '❤️', '😂', '🎉', '😮']
 
 type SidebarContentProps = {
-  selectedItem: SelectedItem
+  channels: Channel[]
+  selectedItem: SelectedItem | null
   onSelect: (item: SelectedItem) => void
 }
 
-function SidebarContent({ selectedItem, onSelect }: SidebarContentProps) {
+function SidebarContent({
+  channels,
+  selectedItem,
+  onSelect,
+}: SidebarContentProps) {
   const isSelected = (item: SelectedItem) =>
-    selectedItem.type === item.type && selectedItem.id === item.id
+    selectedItem?.type === item.type && selectedItem?.id === item.id
 
   return (
     <div className="flex flex-col h-full">
@@ -113,14 +119,17 @@ function Sidebar(props: SidebarContentProps) {
 }
 
 function ChannelHeader({
+  channels,
   selectedItem,
   onMenuClick,
 }: {
-  selectedItem: SelectedItem
+  channels: Channel[]
+  selectedItem: SelectedItem | null
   onMenuClick: () => void
 }) {
-  const label =
-    selectedItem.type === 'channel'
+  const label = !selectedItem
+    ? ''
+    : selectedItem.type === 'channel'
       ? `# ${channels.find((c) => c.id === selectedItem.id)?.name ?? ''}`
       : `@ ${dms.find((d) => d.id === selectedItem.id)?.name ?? ''}`
 
@@ -314,26 +323,140 @@ function MessageInput({
   )
 }
 
+type ChannelMessageRow = {
+  id: string
+  channel_id: string
+  user_name: string
+  content: string
+  created_at: string
+}
+
 export default function App() {
   const [isOpen, setIsOpen] = useState(false)
-  const [selectedItem, setSelectedItem] = useState<SelectedItem>({
-    type: 'channel',
-    id: channels[0].id,
-  })
+  const [channels, setChannels] = useState<Channel[]>([])
+  const [selectedItem, setSelectedItem] = useState<SelectedItem | null>(null)
   const [messages, setMessages] = useState<Message[]>(initialMessages)
   const [input, setInput] = useState('')
   const endRef = useRef<HTMLDivElement>(null)
 
-  const visibleMessages = messages.filter(
-    (m) => m.type === selectedItem.type && m.parentId === selectedItem.id
-  )
+  const selectedChannelId =
+    selectedItem?.type === 'channel' ? selectedItem.id : null
+
+  const visibleMessages = selectedItem
+    ? messages.filter(
+        (m) =>
+          m.type === selectedItem.type && m.parentId === selectedItem.id
+      )
+    : []
+
+  useEffect(() => {
+    const fetchChannels = async () => {
+      const { data, error } = await supabase.from('channels').select('*')
+      if (error) {
+        console.error(error)
+        return
+      }
+      const list = (data ?? []) as Channel[]
+      setChannels(list)
+      setSelectedItem((prev) =>
+        prev ?? (list[0] ? { type: 'channel', id: list[0].id } : null)
+      )
+    }
+    fetchChannels()
+  }, [])
+
+  const loadChannelMessages = async (channelId: string) => {
+    const { data, error } = await supabase
+      .from('messages')
+      .select('*')
+      .eq('channel_id', channelId)
+      .order('created_at', { ascending: true })
+    if (error) {
+      console.error(error)
+      return
+    }
+    const mapped: Message[] = ((data ?? []) as ChannelMessageRow[]).map(
+      (r) => ({
+        id: r.id,
+        type: 'channel',
+        parentId: r.channel_id,
+        userName: r.user_name,
+        body: r.content,
+        createdAt: r.created_at,
+        reactions: {},
+      })
+    )
+    setMessages(mapped)
+  }
+
+  useEffect(() => {
+    if (!selectedChannelId) return
+    loadChannelMessages(selectedChannelId)
+
+    const channel = supabase
+      .channel(`messages:${selectedChannelId}`)
+      .on(
+        'postgres_changes',
+        { event: 'INSERT', schema: 'public', table: 'messages' },
+        (payload) => {
+          console.log('realtime payload', payload)
+          const row = payload.new as ChannelMessageRow
+          if (row.channel_id !== selectedChannelId) return
+          const message: Message = {
+            id: row.id,
+            type: 'channel',
+            parentId: row.channel_id,
+            userName: row.user_name,
+            body: row.content,
+            createdAt: row.created_at,
+            reactions: {},
+          }
+          setMessages((prev) =>
+            prev.some((m) => m.id === message.id) ? prev : [...prev, message]
+          )
+        }
+      )
+      .subscribe((status) => {
+        console.log('channel status', status)
+      })
+
+    return () => {
+      supabase.removeChannel(channel)
+    }
+  }, [selectedChannelId])
+
+  useEffect(() => {
+    if (selectedItem?.type === 'dm') {
+      setMessages(
+        initialMessages.filter(
+          (m) => m.type === 'dm' && m.parentId === selectedItem.id
+        )
+      )
+    }
+  }, [selectedItem])
 
   useEffect(() => {
     endRef.current?.scrollIntoView({ behavior: 'smooth' })
   }, [messages])
 
-  const handleSend = () => {
-    if (!input.trim()) return
+  const handleSend = async () => {
+    if (!input.trim() || !selectedItem) return
+
+    if (selectedItem.type === 'channel') {
+      const text = input
+      setInput('')
+      const { error } = await supabase.from('messages').insert({
+        content: text,
+        channel_id: selectedItem.id,
+        user_name: '自分',
+      })
+      if (error) {
+        console.error(error)
+        return
+      }
+      return
+    }
+
     const newMessage: Message = {
       id: crypto.randomUUID(),
       type: selectedItem.type,
@@ -375,13 +498,18 @@ export default function App() {
 
   return (
     <div className="min-h-screen flex">
-      <Sidebar selectedItem={selectedItem} onSelect={setSelectedItem} />
+      <Sidebar
+        channels={channels}
+        selectedItem={selectedItem}
+        onSelect={setSelectedItem}
+      />
       <Sheet open={isOpen} onOpenChange={setIsOpen}>
         <SheetContent
           side="left"
           className="w-[260px] bg-[#611f69] text-white p-0"
         >
           <SidebarContent
+            channels={channels}
             selectedItem={selectedItem}
             onSelect={setSelectedItem}
           />
@@ -389,6 +517,7 @@ export default function App() {
       </Sheet>
       <main className="flex-1 flex flex-col">
         <ChannelHeader
+          channels={channels}
           selectedItem={selectedItem}
           onMenuClick={() => setIsOpen(true)}
         />
